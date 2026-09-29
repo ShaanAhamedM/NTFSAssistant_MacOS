@@ -1,0 +1,45 @@
+# Build artifacts
+.build/
+build/
+DerivedData/
+*.o
+*.dylib
+*.a
+
+# Packages and Installers
+*.pkg
+*.dmg
+*.iso
+
+# Temporary & Test Disk Images
+*.img
+*.raw
+*.sparseimage
+*.sparsebundle
+/tests_tmp/
+
+# Logs and Crash Reports
+*.log
+/tmp/
+
+# macOS System Files
+.DS_Store
+.AppleDouble
+.LSOverride
+._*
+.Spotlight-V100
+.Trashes
+
+# Xcode / SwiftPM / IDE Cache
+*.xcuserstate
+project.xcworkspace/xcuserdata/
+*.xcuserdatad/
+.swiftpm/
+.idea/
+.vscode/
+
+# Environment and Secrets
+.env
+.env.*
+*.pem
+*.key
