@@ -88,6 +88,29 @@ osascript -e 'tell application "System Events" to make login item at end with pr
 
 ---
 
+## 🔄 Cross-Platform Sharing (macOS ↔ Windows)
+
+**Can I switch the SSD between Mac and Windows freely? YES, 100%!**
+
+Because NTFS is Microsoft’s native filesystem:
+- **On Windows**: The SSD is natively plug-and-play. No extra software or configuration is needed. All files created, modified, or moved while on macOS via NTFS Assistant are 100% standard NTFS files that open instantly on Windows.
+- **On macOS**: NTFS Assistant gives you full Read & Write access without paid software or kernel modifications.
+
+### Recommended Routine for Moving Between Operating Systems:
+
+```text
+[macOS] Click "Safe Eject & Sync"  ──►  [Windows] Plug in & Use Natively  ──►  [Windows] "Safely Remove Hardware"  ──►  [macOS] Plug in & Auto R/W
+```
+
+1. **When disconnecting from Mac to connect to Windows**:
+   - In NTFS Assistant, click **"Safe Eject & Sync"** (or Eject in Finder).
+   - This ensures all pending write buffers are safely flushed (`sync`) to physical NAND flash before you unplug the cable.
+2. **When disconnecting from Windows to connect to Mac**:
+   - Always click the **"Safely Remove Hardware and Eject Media"** (USB tray icon) in Windows before pulling the cable.
+   - This prevents Windows from leaving an uncommitted journal lock on the filesystem.
+
+---
+
 ## ⚠️ Resolving Windows Fast Startup (If Red Badge Appears)
 
 If the app detects that Windows did not cleanly unmount the drive:
