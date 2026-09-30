@@ -64,6 +64,7 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
         } else {
             button.image = NSImage(systemSymbolName: "externaldrive", accessibilityDescription: "NTFS Assistant")
         }
+        button.image?.isTemplate = true
     }
     
     @objc private func togglePopover() {

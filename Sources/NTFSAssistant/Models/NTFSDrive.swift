@@ -102,6 +102,10 @@ public struct NTFSDrive: Identifiable, Equatable, Sendable {
         return lower.contains("crucial") || lower.contains("x9")
     }
     
+    public var isLowDiskSpace: Bool {
+        return isMounted && freeBytes > 0 && freeBytes < 200 * 1024 * 1024 // < 200MB free
+    }
+    
     public var capacityFormatted: String {
         let formatter = ByteCountFormatter()
         formatter.allowedUnits = [.useGB, .useTB]
@@ -111,7 +115,7 @@ public struct NTFSDrive: Identifiable, Equatable, Sendable {
     
     public var freeFormatted: String {
         let formatter = ByteCountFormatter()
-        formatter.allowedUnits = [.useGB, .useTB]
+        formatter.allowedUnits = [.useMB, .useGB, .useTB]
         formatter.countStyle = .decimal
         return formatter.string(fromByteCount: freeBytes)
     }

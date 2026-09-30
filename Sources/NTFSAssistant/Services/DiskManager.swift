@@ -110,7 +110,17 @@ public final class DiskManager: ObservableObject, @unchecked Sendable {
         let obs3 = center.addObserver(forName: NSWorkspace.didRenameVolumeNotification, object: nil, queue: .main) { [weak self] _ in
             self?.scanDrives()
         }
-        workspaceObservers.append(contentsOf: [obs1, obs2, obs3])
+        let obs4 = center.addObserver(forName: NSWorkspace.willSleepNotification, object: nil, queue: .main) { _ in
+            // Flush all pending filesystem caches to hardware NAND prior to system sleep
+            let syncTask = Process()
+            syncTask.launchPath = "/bin/sync"
+            try? syncTask.run()
+        }
+        let obs5 = center.addObserver(forName: NSWorkspace.didWakeNotification, object: nil, queue: .main) { [weak self] _ in
+            // Refresh disk states and verify mount connections after system wake
+            self?.scanDrives()
+        }
+        workspaceObservers.append(contentsOf: [obs1, obs2, obs3, obs4, obs5])
     }
     
     private func startPeriodicScan() {
@@ -156,12 +166,13 @@ public final class DiskManager: ObservableObject, @unchecked Sendable {
     // MARK: - Drive Scanning & Inspection
     public func scanDrives() {
         queue.async { [weak self] in
-            guard let self = self else { return }
-            
-            // Concurrency guard: avoid stacking redundant scans
-            if self.isScanning { return }
-            self.isScanning = true
-            defer { self.isScanning = false }
+            autoreleasepool {
+                guard let self = self else { return }
+                
+                // Concurrency guard: avoid stacking redundant scans
+                if self.isScanning { return }
+                self.isScanning = true
+                defer { self.isScanning = false }
             
             let task = Process()
             task.launchPath = "/usr/sbin/diskutil"
@@ -266,13 +277,15 @@ public final class DiskManager: ObservableObject, @unchecked Sendable {
             } catch {
                 print("Error scanning disks: \(error)")
             }
+            }
         }
     }
     
     private func evaluatePartition(bsdName: String, parentDevice: String) -> NTFSDrive? {
-        let task = Process()
-        task.launchPath = "/usr/sbin/diskutil"
-        task.arguments = ["info", "-plist", bsdName]
+        return autoreleasepool {
+            let task = Process()
+            task.launchPath = "/usr/sbin/diskutil"
+            task.arguments = ["info", "-plist", bsdName]
         
         let pipe = Pipe()
         task.standardOutput = pipe
@@ -432,6 +445,7 @@ public final class DiskManager: ObservableObject, @unchecked Sendable {
             )
         } catch {
             return nil
+        }
         }
     }
     

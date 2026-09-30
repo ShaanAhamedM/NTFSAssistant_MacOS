@@ -252,6 +252,10 @@ ${INFO_OUTPUT}"
             fi
 
             if [ "${IS_MOUNTED}" = "true" ]; then
+                # Prevent Spotlight indexing deadlocks and background thrashing over NFS loopback
+                /usr/bin/touch "${MOUNTPOINT}/.metadata_never_index" 2>/dev/null || true
+                /usr/bin/mdutil -i off "${MOUNTPOINT}" >/dev/null 2>&1 || true
+                
                 echo "MOUNT_SUCCESS: Read & Write active on ${MOUNTPOINT}"
                 rm -f "${MOUNT_LOG}"
                 exit 0
@@ -294,7 +298,7 @@ ${INFO_OUTPUT}"
             echo "UNMOUNT_SUCCESS"
             exit 0
         else
-            BUSY_PROCS=$(/usr/sbin/lsof +D "${MOUNTPOINT}" 2>/dev/null | awk 'NR>1 {print $1}' | sort -u | tr '\n' ' ' | sed 's/ $//')
+            BUSY_PROCS=$(/usr/sbin/lsof +D "${MOUNTPOINT}" 2>/dev/null | awk 'NR>1 {print $1}' | sort -u | tr '\n' ' ' | sed 's/ $//' || true)
             if [ -n "${BUSY_PROCS}" ]; then
                 echo "UNMOUNT_FAILED_BUSY: Mountpoint is busy. Active processes: ${BUSY_PROCS}"
             else
@@ -352,7 +356,7 @@ ${INFO_OUTPUT}"
 
                 if [ "${UNMOUNT_OK}" != "true" ]; then
                     # Check for busy processes and refuse to corrupt the drive
-                    BUSY_PROCS=$(/usr/sbin/lsof +D "${MP}" 2>/dev/null | awk 'NR>1 {print $1}' | sort -u | tr '\n' ' ' | sed 's/ $//')
+                    BUSY_PROCS=$(/usr/sbin/lsof +D "${MP}" 2>/dev/null | awk 'NR>1 {print $1}' | sort -u | tr '\n' ' ' | sed 's/ $//' || true)
                     echo "EJECT_FAILED_BUSY: Drive cannot be safely ejected because files are open by: ${BUSY_PROCS:-unknown application}. Please close open files and try again."
                     exit 1
                 fi
@@ -374,9 +378,18 @@ ${INFO_OUTPUT}"
         # 6. Dismount remaining partitions on the physical drive cleanly
         /usr/sbin/diskutil unmountDisk "${DEVICE}" >/dev/null 2>&1 || true
 
-        # 7. Issue hardware eject (flushes drive controller write buffer & safely powers down)
+        # 7. Issue hardware eject with retry loop (allows DiskArbitration to settle)
         EJECT_OUTPUT=""
-        if EJECT_OUTPUT=$(/usr/sbin/diskutil eject "${DEVICE}" 2>&1); then
+        EJECT_OK=false
+        for ej_attempt in 1 2 3 4; do
+            if EJECT_OUTPUT=$(/usr/sbin/diskutil eject "${DEVICE}" 2>&1); then
+                EJECT_OK=true
+                break
+            fi
+            sleep 0.4
+        done
+
+        if [ "${EJECT_OK}" = "true" ]; then
             echo "EJECT_SUCCESS"
             exit 0
         else

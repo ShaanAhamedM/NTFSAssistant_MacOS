@@ -126,9 +126,19 @@ public struct MenuBarView: View {
                                 .foregroundColor(.purple)
                                 .cornerRadius(4)
                         }
+                        
+                        if drive.isLowDiskSpace {
+                            Text("Low Space")
+                                .font(.system(size: 9, weight: .bold))
+                                .padding(.horizontal, 4)
+                                .padding(.vertical, 1)
+                                .background(Color.orange.opacity(0.2))
+                                .foregroundColor(.orange)
+                                .cornerRadius(4)
+                        }
                     }
                     
-                    Text("\(drive.capacityFormatted) • /dev/\(drive.bsdName)")
+                    Text("\(drive.capacityFormatted) (\(drive.freeFormatted) free) • /dev/\(drive.bsdName)")
                         .font(.system(size: 11))
                         .foregroundColor(.secondary)
                 }
