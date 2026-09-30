@@ -219,6 +219,9 @@ ${INFO_OUTPUT}"
         fi
 
         # 3. Ensure mount directory exists with proper permissions
+        if [ -d "${MOUNTPOINT}" ]; then
+            /bin/rmdir "${MOUNTPOINT}" 2>/dev/null || true
+        fi
         /bin/mkdir -p "${MOUNTPOINT}"
         /usr/sbin/chown "${TARGET_UID}:${TARGET_GID}" "${MOUNTPOINT}" 2>/dev/null || true
 
@@ -235,7 +238,7 @@ ${INFO_OUTPUT}"
                 if grep -Ei "falling back to read-only|unsafe state|windows is hibernated|refused to mount|metadata kept" "${MOUNT_LOG}" >/dev/null 2>&1; then
                     break
                 fi
-                if /sbin/mount | grep -F "${MOUNTPOINT}" >/dev/null 2>&1; then
+                if /sbin/mount | grep -F " on ${MOUNTPOINT} " >/dev/null 2>&1 || /sbin/mount | grep -F " on ${MOUNTPOINT} (" >/dev/null 2>&1; then
                     IS_MOUNTED=true
                     break
                 fi

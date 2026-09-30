@@ -114,7 +114,7 @@ public final class DiskManager: ObservableObject, @unchecked Sendable {
     }
     
     private func startPeriodicScan() {
-        scanTimer = Timer.scheduledTimer(withTimeInterval: 3.0, repeats: true) { [weak self] _ in
+        scanTimer = Timer.scheduledTimer(withTimeInterval: 5.0, repeats: true) { [weak self] _ in
             self?.scanDrives()
         }
     }
@@ -158,6 +158,11 @@ public final class DiskManager: ObservableObject, @unchecked Sendable {
         queue.async { [weak self] in
             guard let self = self else { return }
             
+            // Concurrency guard: avoid stacking redundant scans
+            if self.isScanning { return }
+            self.isScanning = true
+            defer { self.isScanning = false }
+            
             let task = Process()
             task.launchPath = "/usr/sbin/diskutil"
             task.arguments = ["list", "-plist"]
@@ -179,6 +184,11 @@ public final class DiskManager: ObservableObject, @unchecked Sendable {
                         let parentDisk = diskEntry["DeviceIdentifier"] as? String ?? ""
                         if let partitions = diskEntry["Partitions"] as? [[String: Any]] {
                             for part in partitions {
+                                let content = part["Content"] as? String ?? ""
+                                // Fast filter: Skip macOS APFS containers, recovery, EFI, and HFS system partitions
+                                if content.hasPrefix("Apple_") || content == "EFI" {
+                                    continue
+                                }
                                 if let bsdName = part["DeviceIdentifier"] as? String {
                                     if let drive = self.evaluatePartition(bsdName: bsdName, parentDevice: parentDisk) {
                                         discoveredDrives.append(drive)
@@ -247,7 +257,10 @@ public final class DiskManager: ObservableObject, @unchecked Sendable {
                         }
                         
                         let simulated = self.drives.filter { $0.isSimulated }
-                        self.drives = updatedList + simulated
+                        let targetList = updatedList + simulated
+                        if self.drives != targetList {
+                            self.drives = targetList
+                        }
                     }
                 }
             } catch {
