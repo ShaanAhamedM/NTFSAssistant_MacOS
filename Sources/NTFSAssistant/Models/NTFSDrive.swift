@@ -57,6 +57,7 @@ public struct NTFSDrive: Identifiable, Equatable, Sendable {
     public var isBusy: Bool
     public var statusMessage: String?
     public var isSimulated: Bool
+    public var isVirtual: Bool
     
     public init(
         id: String,
@@ -74,7 +75,8 @@ public struct NTFSDrive: Identifiable, Equatable, Sendable {
         lastHealthReport: String? = nil,
         isBusy: Bool = false,
         statusMessage: String? = nil,
-        isSimulated: Bool = false
+        isSimulated: Bool = false,
+        isVirtual: Bool = false
     ) {
         self.id = id
         self.bsdName = bsdName
@@ -92,6 +94,7 @@ public struct NTFSDrive: Identifiable, Equatable, Sendable {
         self.isBusy = isBusy
         self.statusMessage = statusMessage
         self.isSimulated = isSimulated
+        self.isVirtual = isVirtual
     }
     
     public var isCrucialX9: Bool {

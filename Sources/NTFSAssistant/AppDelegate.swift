@@ -1,11 +1,13 @@
 import Cocoa
 import SwiftUI
 import UserNotifications
+import Combine
 
 @MainActor
 public final class AppDelegate: NSObject, NSApplicationDelegate {
     private var statusItem: NSStatusItem!
     private var popover: NSPopover!
+    private var cancellables = Set<AnyCancellable>()
     
     nonisolated public override init() {
         super.init()
@@ -24,6 +26,14 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
             button.target = self
         }
         
+        // Observe drive state changes to update Menu Bar icon dynamically
+        DiskManager.shared.$drives
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] drives in
+                self?.updateMenuBarIcon(drives: drives)
+            }
+            .store(in: &cancellables)
+        
         // Setup Popover
         let popover = NSPopover()
         popover.contentSize = NSSize(width: 380, height: 420)
@@ -36,6 +46,23 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
             if let error = error {
                 print("Notification permission error: \(error)")
             }
+        }
+    }
+    
+    private func updateMenuBarIcon(drives: [NTFSDrive]) {
+        guard let button = statusItem.button else { return }
+        if drives.isEmpty {
+            button.image = NSImage(systemSymbolName: "externaldrive", accessibilityDescription: "NTFS Assistant - No Drives Connected")
+        } else if drives.contains(where: { $0.isBusy }) {
+            button.image = NSImage(systemSymbolName: "externaldrive.badge.timemachine", accessibilityDescription: "NTFS Assistant - Mounting")
+        } else if drives.contains(where: { $0.mountMode == .dirtyUnsafe }) {
+            button.image = NSImage(systemSymbolName: "externaldrive.badge.xmark", accessibilityDescription: "NTFS Assistant - Dirty / Fast Startup Lock")
+        } else if drives.contains(where: { $0.mountMode == .readOnly }) {
+            button.image = NSImage(systemSymbolName: "externaldrive.badge.exclamationmark", accessibilityDescription: "NTFS Assistant - Read-Only Protected")
+        } else if drives.allSatisfy({ $0.mountMode == .readWrite }) {
+            button.image = NSImage(systemSymbolName: "externaldrive.fill.badge.checkmark", accessibilityDescription: "NTFS Assistant - Read & Write Active")
+        } else {
+            button.image = NSImage(systemSymbolName: "externaldrive", accessibilityDescription: "NTFS Assistant")
         }
     }
     

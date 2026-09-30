@@ -69,14 +69,52 @@ public final class PrivilegedHelperManager: @unchecked Sendable {
                 task.standardOutput = pipe
                 task.standardError = pipe
                 
+                let lock = NSLock()
+                var hasResumed = false
+                
+                // Watchdog timer: abort task after 60 seconds if hanging
+                let timer = DispatchSource.makeTimerSource(queue: DispatchQueue.global())
+                timer.schedule(deadline: .now() + 60.0)
+                timer.setEventHandler {
+                    lock.lock()
+                    if !hasResumed {
+                        hasResumed = true
+                        lock.unlock()
+                        if task.isRunning {
+                            task.terminate()
+                        }
+                        continuation.resume(returning: (-1, "Operation timed out after 60 seconds."))
+                    } else {
+                        lock.unlock()
+                    }
+                }
+                timer.resume()
+                
                 do {
                     try task.run()
                     let data = pipe.fileHandleForReading.readDataToEndOfFile()
                     task.waitUntilExit()
-                    let output = String(data: data, encoding: .utf8) ?? ""
-                    continuation.resume(returning: (task.terminationStatus, output))
+                    timer.cancel()
+                    
+                    lock.lock()
+                    if !hasResumed {
+                        hasResumed = true
+                        lock.unlock()
+                        let output = String(data: data, encoding: .utf8) ?? ""
+                        continuation.resume(returning: (task.terminationStatus, output))
+                    } else {
+                        lock.unlock()
+                    }
                 } catch {
-                    continuation.resume(returning: (-1, error.localizedDescription))
+                    timer.cancel()
+                    lock.lock()
+                    if !hasResumed {
+                        hasResumed = true
+                        lock.unlock()
+                        continuation.resume(returning: (-1, error.localizedDescription))
+                    } else {
+                        lock.unlock()
+                    }
                 }
             }
         }
@@ -92,8 +130,13 @@ public final class PrivilegedHelperManager: @unchecked Sendable {
             ]
             let setupScript = scriptCandidates.compactMap { $0 }.first { FileManager.default.fileExists(atPath: $0) } ?? "/Library/Application Support/NTFSAssistant/setup_environment.sh"
             
+            let escapedScript = setupScript
+                .replacingOccurrences(of: "\\", with: "\\\\")
+                .replacingOccurrences(of: "\"", with: "\\\"")
+                .replacingOccurrences(of: "'", with: "'\\''")
+            
             let appleScriptSource = """
-            do shell script "bash '\(setupScript)'" with administrator privileges
+            do shell script "bash '\(escapedScript)'" with administrator privileges
             """
             
             var error: NSDictionary?

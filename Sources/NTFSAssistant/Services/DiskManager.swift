@@ -9,8 +9,16 @@ public final class DiskManager: ObservableObject, @unchecked Sendable {
     
     @Published public var drives: [NTFSDrive] = []
     @Published public var isScanning: Bool = false
-    @Published public var autoMountEnabled: Bool = true
-    @Published public var safeModeEnabled: Bool = true
+    @Published public var autoMountEnabled: Bool {
+        didSet {
+            UserDefaults.standard.set(autoMountEnabled, forKey: "autoMountEnabled")
+        }
+    }
+    @Published public var safeModeEnabled: Bool {
+        didSet {
+            UserDefaults.standard.set(safeModeEnabled, forKey: "safeModeEnabled")
+        }
+    }
     @Published public var alertMessage: String? = nil
     @Published public var showAlert: Bool = false
     
@@ -18,8 +26,26 @@ public final class DiskManager: ObservableObject, @unchecked Sendable {
     private var cancellables = Set<AnyCancellable>()
     private var scanTimer: Timer?
     private let queue = DispatchQueue(label: "com.ntfsassistant.diskmanager", qos: .userInitiated)
+    private var workspaceObservers: [NSObjectProtocol] = []
+    
+    // Tracking user actions and active mount tasks to prevent duplicate operations and race conditions
+    private var userEjectedDevices = Set<String>()
+    private var pendingMounts = Set<String>()
+    private var connectionDebounceWorkItems: [String: DispatchWorkItem] = [:]
     
     private init() {
+        if UserDefaults.standard.object(forKey: "autoMountEnabled") != nil {
+            self.autoMountEnabled = UserDefaults.standard.bool(forKey: "autoMountEnabled")
+        } else {
+            self.autoMountEnabled = true
+        }
+        
+        if UserDefaults.standard.object(forKey: "safeModeEnabled") != nil {
+            self.safeModeEnabled = UserDefaults.standard.bool(forKey: "safeModeEnabled")
+        } else {
+            self.safeModeEnabled = true
+        }
+        
         setupDiskArbitration()
         setupWorkspaceNotifications()
         startPeriodicScan()
@@ -28,6 +54,12 @@ public final class DiskManager: ObservableObject, @unchecked Sendable {
     
     deinit {
         scanTimer?.invalidate()
+        for (_, item) in connectionDebounceWorkItems {
+            item.cancel()
+        }
+        for observer in workspaceObservers {
+            NSWorkspace.shared.notificationCenter.removeObserver(observer)
+        }
         if let session = daSession {
             DASessionUnscheduleFromRunLoop(session, CFRunLoopGetMain(), CFRunLoopMode.defaultMode.rawValue)
         }
@@ -69,15 +101,16 @@ public final class DiskManager: ObservableObject, @unchecked Sendable {
     
     private func setupWorkspaceNotifications() {
         let center = NSWorkspace.shared.notificationCenter
-        center.addObserver(forName: NSWorkspace.didMountNotification, object: nil, queue: .main) { [weak self] _ in
+        let obs1 = center.addObserver(forName: NSWorkspace.didMountNotification, object: nil, queue: .main) { [weak self] _ in
             self?.scanDrives()
         }
-        center.addObserver(forName: NSWorkspace.didUnmountNotification, object: nil, queue: .main) { [weak self] _ in
+        let obs2 = center.addObserver(forName: NSWorkspace.didUnmountNotification, object: nil, queue: .main) { [weak self] _ in
             self?.scanDrives()
         }
-        center.addObserver(forName: NSWorkspace.didRenameVolumeNotification, object: nil, queue: .main) { [weak self] _ in
+        let obs3 = center.addObserver(forName: NSWorkspace.didRenameVolumeNotification, object: nil, queue: .main) { [weak self] _ in
             self?.scanDrives()
         }
+        workspaceObservers.append(contentsOf: [obs1, obs2, obs3])
     }
     
     private func startPeriodicScan() {
@@ -89,6 +122,8 @@ public final class DiskManager: ObservableObject, @unchecked Sendable {
     private func handleDiskAppeared(disk: DADisk) {
         if let desc = DADiskCopyDescription(disk) as? [String: Any],
            let bsdName = desc[kDADiskDescriptionMediaBSDNameKey as String] as? String {
+            connectionDebounceWorkItems[bsdName]?.cancel()
+            
             queue.async { [weak self] in
                 self?.inspectAndAddDisk(bsdName: bsdName, triggeredByConnect: true)
             }
@@ -98,8 +133,18 @@ public final class DiskManager: ObservableObject, @unchecked Sendable {
     private func handleDiskDisappeared(disk: DADisk) {
         if let desc = DADiskCopyDescription(disk) as? [String: Any],
            let bsdName = desc[kDADiskDescriptionMediaBSDNameKey as String] as? String {
+            connectionDebounceWorkItems[bsdName]?.cancel()
+            connectionDebounceWorkItems.removeValue(forKey: bsdName)
+            
+            let parentDevice = bsdName.components(separatedBy: "s").first ?? bsdName
+            
             DispatchQueue.main.async { [weak self] in
-                self?.drives.removeAll { $0.bsdName == bsdName || $0.parentDevice == bsdName }
+                guard let self = self else { return }
+                self.drives.removeAll { $0.bsdName == bsdName || $0.parentDevice == bsdName || $0.bsdName == parentDevice }
+                self.userEjectedDevices.remove(bsdName)
+                self.userEjectedDevices.remove(parentDevice)
+                self.pendingMounts.remove(bsdName)
+                self.pendingMounts.remove(parentDevice)
             }
         }
     }
@@ -113,7 +158,6 @@ public final class DiskManager: ObservableObject, @unchecked Sendable {
         queue.async { [weak self] in
             guard let self = self else { return }
             
-            // Run diskutil list -plist to enumerate volumes
             let task = Process()
             task.launchPath = "/usr/sbin/diskutil"
             task.arguments = ["list", "-plist"]
@@ -147,25 +191,61 @@ public final class DiskManager: ObservableObject, @unchecked Sendable {
                     let finalDiscovered = discoveredDrives
                     
                     DispatchQueue.main.async {
-                        // Preserve existing drive states or update
                         var updatedList: [NTFSDrive] = []
                         for discovered in finalDiscovered {
                             if let existingIndex = self.drives.firstIndex(where: { $0.bsdName == discovered.bsdName }) {
                                 var drive = discovered
-                                drive.isBusy = self.drives[existingIndex].isBusy
+                                let wasBusy = self.drives[existingIndex].isBusy
+                                let prevMode = self.drives[existingIndex].mountMode
+                                
+                                drive.isBusy = wasBusy
+                                drive.statusMessage = self.drives[existingIndex].statusMessage
                                 drive.healthState = self.drives[existingIndex].healthState
                                 drive.lastHealthReport = self.drives[existingIndex].lastHealthReport
-                                updatedList.append(drive)
-                            } else {
-                                updatedList.append(discovered)
-                                // New NTFS drive connected!
-                                if self.autoMountEnabled && discovered.mountMode == .readOnly {
-                                    self.triggerAutoMount(for: discovered)
+                                
+                                // Do not overwrite an active or in-progress state with a transient scan mode
+                                if wasBusy {
+                                    drive.mountMode = prevMode
                                 }
+                                
+                                updatedList.append(drive)
+                                
+                                // AUTOMOUNT: Intercept read-only or unmounted external physical NTFS drives automatically
+                                if self.autoMountEnabled &&
+                                   !drive.isInternal &&
+                                   !drive.isVirtual &&
+                                   !wasBusy &&
+                                   !self.userEjectedDevices.contains(drive.bsdName) &&
+                                   !self.userEjectedDevices.contains(drive.parentDevice) &&
+                                   !self.pendingMounts.contains(drive.bsdName) &&
+                                   drive.healthState != .dirty {
+                                    if drive.mountMode == .readOnly || drive.mountMode == .unmounted {
+                                        drive.isBusy = true
+                                        drive.statusMessage = "Mounting Read & Write..."
+                                        self.triggerAutoMount(for: drive)
+                                    }
+                                }
+                            } else {
+                                var newDrive = discovered
+                                if self.autoMountEnabled &&
+                                   !newDrive.isInternal &&
+                                   !newDrive.isVirtual &&
+                                   !self.userEjectedDevices.contains(newDrive.bsdName) &&
+                                   !self.userEjectedDevices.contains(newDrive.parentDevice) &&
+                                   !self.pendingMounts.contains(newDrive.bsdName) &&
+                                   newDrive.healthState != .dirty {
+                                    if newDrive.mountMode == .readOnly || newDrive.mountMode == .unmounted {
+                                        newDrive.isBusy = true
+                                        newDrive.statusMessage = "Mounting Read & Write..."
+                                        updatedList.append(newDrive)
+                                        self.triggerAutoMount(for: newDrive)
+                                        continue
+                                    }
+                                }
+                                updatedList.append(newDrive)
                             }
                         }
                         
-                        // Preserve any simulated drives during testing
                         let simulated = self.drives.filter { $0.isSimulated }
                         self.drives = updatedList + simulated
                     }
@@ -197,6 +277,8 @@ public final class DiskManager: ObservableObject, @unchecked Sendable {
             let fileSystemName = info["FilesystemName"] as? String ?? ""
             let typeBundle = info["Type"] as? String ?? ""
             let isInternal = info["Internal"] as? Bool ?? false
+            let isVirtual = ((info["VirtualOrPhysical"] as? String)?.lowercased() == "virtual") ||
+                            ((info["DeviceNode"] as? String)?.contains("diskimages") == true)
             
             // Strictly detect NTFS volumes
             let isNTFS = fileSystemType.lowercased().contains("ntfs") ||
@@ -207,11 +289,41 @@ public final class DiskManager: ObservableObject, @unchecked Sendable {
                 return nil
             }
             
-            let volumeName = info["VolumeName"] as? String ?? (info["MediaName"] as? String ?? "Crucial X9 SSD")
-            let totalBytes = info["TotalSize"] as? Int64 ?? 1_000_000_000_000
-            let freeBytes = info["FreeSpace"] as? Int64 ?? 0
+            let devNode = "/dev/\(bsdName)"
             
-            // Check all active mounts from /sbin/mount (detects both native and fuse-t NFS mounts)
+            // 1. Authoritative check: Is ntfs-3g actively running for this partition?
+            var ntfs3gMountPoint: String? = nil
+            let psTask = Process()
+            psTask.launchPath = "/bin/ps"
+            psTask.arguments = ["-eo", "command"]
+            let psPipe = Pipe()
+            psTask.standardOutput = psPipe
+            try? psTask.run()
+            let psData = psPipe.fileHandleForReading.readDataToEndOfFile()
+            psTask.waitUntilExit()
+            let psOutput = String(data: psData, encoding: .utf8) ?? ""
+            let psLines = psOutput.components(separatedBy: "\n")
+            
+            for line in psLines {
+                if line.contains("ntfs-3g") && line.contains(devNode) {
+                    let parts = line.components(separatedBy: " ")
+                    if let devIndex = parts.firstIndex(where: { $0 == devNode || $0.hasSuffix(bsdName) }),
+                       devIndex + 1 < parts.count {
+                        var mp = parts[devIndex + 1]
+                        var nextIdx = devIndex + 2
+                        while nextIdx < parts.count && !parts[nextIdx].hasPrefix("-o") {
+                            mp += " " + parts[nextIdx]
+                            nextIdx += 1
+                        }
+                        if mp.hasPrefix("/Volumes") {
+                            ntfs3gMountPoint = mp
+                        }
+                    }
+                    break
+                }
+            }
+            
+            // 2. Check /sbin/mount for active mounts
             let mountCheckTask = Process()
             mountCheckTask.launchPath = "/sbin/mount"
             let mountPipe = Pipe()
@@ -224,32 +336,66 @@ public final class DiskManager: ObservableObject, @unchecked Sendable {
             
             var isMounted = false
             var detectedMountPoint: String? = info["MountPoint"] as? String
+            if detectedMountPoint?.isEmpty == true {
+                detectedMountPoint = nil
+            }
             var currentMode: MountMode = .unmounted
             
-            let bsdNode = "/dev/\(bsdName)"
-            let expectedVolumeMount = "/Volumes/\(volumeName)"
-            
-            for line in mountLines {
-                let containsDevice = line.contains(bsdNode)
-                let containsFuseT = (line.hasPrefix("fuse-t:") || line.contains("fuse")) && (line.contains(expectedVolumeMount) || line.contains(volumeName))
+            if let mp = ntfs3gMountPoint {
+                // Confirmed active ntfs-3g Read & Write mount!
+                isMounted = true
+                detectedMountPoint = mp
+                currentMode = .readWrite
+            } else {
+                // Check if device is mounted natively by macOS
+                for line in mountLines {
+                    if line.contains("\(devNode) on ") || line.hasPrefix("\(devNode) ") {
+                        isMounted = true
+                        if let onRange = line.range(of: " on "),
+                           let parenRange = line.range(of: " (", range: onRange.upperBound..<line.endIndex) {
+                            detectedMountPoint = String(line[onRange.upperBound..<parenRange.lowerBound])
+                        }
+                        if line.contains("read-only") {
+                            currentMode = .readOnly
+                        } else {
+                            currentMode = .readWrite
+                        }
+                        break
+                    }
+                }
                 
-                if containsDevice || containsFuseT {
+                // Fallback check: diskutil info MountPoint
+                if !isMounted, let mp = detectedMountPoint, !mp.isEmpty, mp != "/", FileManager.default.fileExists(atPath: mp) {
                     isMounted = true
-                    if let onRange = line.range(of: " on "),
-                       let parenRange = line.range(of: " (", range: onRange.upperBound..<line.endIndex) {
-                        detectedMountPoint = String(line[onRange.upperBound..<parenRange.lowerBound])
-                    } else {
-                        detectedMountPoint = expectedVolumeMount
+                    let writable = (info["WritableVolume"] as? Bool) ?? (info["Writable"] as? Bool ?? true)
+                    currentMode = writable ? .readWrite : .readOnly
+                }
+            }
+            
+            // Determine accurate volume name
+            var volumeName = (info["VolumeName"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+            if volumeName.isEmpty {
+                volumeName = (info["MediaName"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+            }
+            if volumeName.isEmpty, let mp = detectedMountPoint, !mp.isEmpty, mp != "/" {
+                volumeName = URL(fileURLWithPath: mp).lastPathComponent
+            }
+            if volumeName.isEmpty {
+                volumeName = "NTFS Volume (\(bsdName))"
+            }
+            
+            // Determine capacity and free space accurately
+            var totalBytes = info["TotalSize"] as? Int64 ?? (info["Size"] as? Int64 ?? 1_000_000_000_000)
+            var freeBytes = info["FreeSpace"] as? Int64 ?? 0
+            
+            if isMounted, let mp = detectedMountPoint, FileManager.default.fileExists(atPath: mp) {
+                if let attrs = try? FileManager.default.attributesOfFileSystem(forPath: mp) {
+                    if let size = attrs[.systemSize] as? Int64, size > 0 {
+                        totalBytes = size
                     }
-                    
-                    if containsFuseT || line.contains("osxfuse") || line.contains("fuse-t") {
-                        currentMode = .readWrite
-                    } else if line.contains("read-only") {
-                        currentMode = .readOnly
-                    } else {
-                        currentMode = .readWrite
+                    if let free = attrs[.systemFreeSize] as? Int64 {
+                        freeBytes = free
                     }
-                    break
                 }
             }
             
@@ -257,7 +403,7 @@ public final class DiskManager: ObservableObject, @unchecked Sendable {
                 id: bsdName,
                 bsdName: bsdName,
                 parentDevice: parentDevice,
-                name: volumeName.isEmpty ? "Crucial X9" : volumeName,
+                name: volumeName,
                 totalBytes: totalBytes,
                 freeBytes: freeBytes,
                 mountPoint: detectedMountPoint,
@@ -266,7 +412,10 @@ public final class DiskManager: ObservableObject, @unchecked Sendable {
                 filesystem: "NTFS",
                 mountMode: currentMode,
                 healthState: .unknown,
-                isSimulated: false
+                isBusy: false,
+                statusMessage: nil,
+                isSimulated: false,
+                isVirtual: isVirtual
             )
         } catch {
             return nil
@@ -275,55 +424,118 @@ public final class DiskManager: ObservableObject, @unchecked Sendable {
     
     private func inspectAndAddDisk(bsdName: String, triggeredByConnect: Bool) {
         let parentDevice = bsdName.components(separatedBy: "s").first ?? bsdName
-        if let drive = evaluatePartition(bsdName: bsdName, parentDevice: parentDevice) {
-            DispatchQueue.main.async { [weak self] in
-                guard let self = self else { return }
+        guard let drive = evaluatePartition(bsdName: bsdName, parentDevice: parentDevice) else {
+            return
+        }
+        
+        DispatchQueue.main.async { [weak self] in
+            guard let self = self else { return }
+            
+            // Check if drive is internal or a virtual disk image - do not automount
+            if drive.isInternal || drive.isVirtual {
                 if let idx = self.drives.firstIndex(where: { $0.bsdName == drive.bsdName }) {
                     self.drives[idx] = drive
                 } else {
                     self.drives.append(drive)
-                    if triggeredByConnect && self.autoMountEnabled && drive.mountMode == .readOnly {
-                        self.triggerAutoMount(for: drive)
-                    }
                 }
+                return
+            }
+            
+            // Check if drive was explicitly ejected by user
+            if self.userEjectedDevices.contains(drive.bsdName) || self.userEjectedDevices.contains(drive.parentDevice) {
+                if let idx = self.drives.firstIndex(where: { $0.bsdName == drive.bsdName }) {
+                    self.drives[idx] = drive
+                } else {
+                    self.drives.append(drive)
+                }
+                return
+            }
+            
+            // If already Read & Write, record it
+            if drive.mountMode == .readWrite {
+                if let idx = self.drives.firstIndex(where: { $0.bsdName == drive.bsdName }) {
+                    self.drives[idx] = drive
+                } else {
+                    self.drives.append(drive)
+                }
+                return
+            }
+            
+            // If drive is in Read-Only or Unmounted mode and autoMount is enabled, trigger immediately
+            if self.autoMountEnabled && !self.pendingMounts.contains(drive.bsdName) {
+                if drive.mountMode == .readOnly || drive.mountMode == .unmounted {
+                    var initialDrive = drive
+                    initialDrive.isBusy = true
+                    initialDrive.statusMessage = "Mounting Read & Write..."
+                    if let idx = self.drives.firstIndex(where: { $0.bsdName == drive.bsdName }) {
+                        self.drives[idx] = initialDrive
+                    } else {
+                        self.drives.append(initialDrive)
+                    }
+                    self.triggerAutoMount(for: drive)
+                    return
+                }
+            }
+            
+            // Default add or update
+            if let idx = self.drives.firstIndex(where: { $0.bsdName == drive.bsdName }) {
+                self.drives[idx] = drive
+            } else {
+                self.drives.append(drive)
             }
         }
     }
     
     // MARK: - Automount & R/W Mount Workflow
+    public func userRequestedMount(drive: NTFSDrive) {
+        userEjectedDevices.remove(drive.bsdName)
+        userEjectedDevices.remove(drive.parentDevice)
+        Task {
+            await mountReadWrite(drive: drive, isAutoMount: false)
+        }
+    }
+    
     public func triggerAutoMount(for drive: NTFSDrive) {
+        guard !pendingMounts.contains(drive.bsdName) else { return }
         Task {
             await mountReadWrite(drive: drive, isAutoMount: true)
         }
     }
     
+    @discardableResult
     public func mountReadWrite(drive: NTFSDrive, isAutoMount: Bool = false) async -> Bool {
-        setBusy(for: drive.bsdName, isBusy: true)
+        if pendingMounts.contains(drive.bsdName) {
+            return false
+        }
+        pendingMounts.insert(drive.bsdName)
+        defer {
+            pendingMounts.remove(drive.bsdName)
+        }
         
-        // Simulated drive handling
+        setBusy(for: drive.bsdName, isBusy: true, statusMessage: "Mounting Read & Write...")
+        
         if drive.isSimulated {
-            try? await Task.sleep(nanoseconds: 1_000_000_000)
+            try? await Task.sleep(nanoseconds: 800_000_000)
             DispatchQueue.main.async {
                 if let idx = self.drives.firstIndex(where: { $0.bsdName == drive.bsdName }) {
                     self.drives[idx].mountMode = .readWrite
                     self.drives[idx].isMounted = true
                     self.drives[idx].mountPoint = "/Volumes/\(self.drives[idx].name)"
                     self.drives[idx].isBusy = false
-                    self.notifyUser(title: "Crucial X9 (Simulated)", message: "Mounted with full Read & Write access.")
+                    self.drives[idx].statusMessage = nil
+                    self.notifyUser(title: "\(self.drives[idx].name) (Simulated)", message: "Mounted with full Read & Write access.")
                 }
             }
             return true
         }
         
         let devicePath = "/dev/\(drive.bsdName)"
-        let volumeName = drive.name.isEmpty ? "Crucial X9" : drive.name
-        let mountPoint = "/Volumes/\(volumeName)"
+        let volumeName = drive.name.isEmpty ? "NTFS Volume" : drive.name
+        let mountPoint = drive.mountPoint ?? "/Volumes/\(volumeName)"
         let uid = String(getuid())
         let gid = String(getgid())
         let helper = PrivilegedHelperManager.shared
         
-        // Helper unmounts read-only mount first, runs Pre-Mount Integrity Guard (ntfsfix -n),
-        // and mounts via ntfs-3g if clean. If dirty, helper instantly remounts read-only.
         let result = await helper.executeHelper(arguments: ["mount", devicePath, mountPoint, uid, gid, volumeName])
         
         if result.status == 0 {
@@ -334,32 +546,35 @@ public final class DiskManager: ObservableObject, @unchecked Sendable {
                     self.drives[idx].mountPoint = mountPoint
                     self.drives[idx].healthState = .clean
                     self.drives[idx].isBusy = false
+                    self.drives[idx].statusMessage = nil
                 }
                 self.notifyUser(title: "\(volumeName) Ready", message: "Mounted with full Read & Write access.")
             }
+            // Delay scan slightly to let system and FUSE-T settle
+            try? await Task.sleep(nanoseconds: 500_000_000)
             scanDrives()
             return true
         } else if result.status == 2 {
-            // Pre-Mount Guard blocked write due to Fast Startup or dirty flag
             DispatchQueue.main.async {
                 if let idx = self.drives.firstIndex(where: { $0.bsdName == drive.bsdName }) {
                     self.drives[idx].mountMode = .dirtyUnsafe
                     self.drives[idx].healthState = .dirty
                     self.drives[idx].lastHealthReport = result.output
                     self.drives[idx].isBusy = false
+                    self.drives[idx].statusMessage = nil
                 }
                 self.showIntegrityGuardAlert(driveName: volumeName, report: result.output)
             }
             scanDrives()
             return false
         } else {
-            // General mount error, fell back to read-only
             DispatchQueue.main.async {
                 if let idx = self.drives.firstIndex(where: { $0.bsdName == drive.bsdName }) {
                     self.drives[idx].mountMode = .readOnly
                     self.drives[idx].isBusy = false
+                    self.drives[idx].statusMessage = nil
                 }
-                self.notifyUser(title: "\(volumeName) Fallback", message: "R/W mount failed. Safely reverted to native Read-Only access.")
+                self.notifyUser(title: "\(volumeName) Protected", message: "R/W mount failed. Safely reverted to native Read-Only access.")
             }
             scanDrives()
             return false
@@ -368,10 +583,10 @@ public final class DiskManager: ObservableObject, @unchecked Sendable {
     
     // MARK: - Safe Eject Sequence
     public func safeEject(drive: NTFSDrive) async -> Bool {
-        setBusy(for: drive.bsdName, isBusy: true)
+        setBusy(for: drive.bsdName, isBusy: true, statusMessage: "Ejecting...")
         
         if drive.isSimulated {
-            try? await Task.sleep(nanoseconds: 800_000_000)
+            try? await Task.sleep(nanoseconds: 500_000_000)
             DispatchQueue.main.async {
                 self.drives.removeAll { $0.bsdName == drive.bsdName }
                 self.notifyUser(title: "Safe Eject", message: "\(drive.name) safely ejected.")
@@ -383,16 +598,30 @@ public final class DiskManager: ObservableObject, @unchecked Sendable {
         let mountPoint = drive.mountPoint ?? "/Volumes/\(drive.name)"
         let helper = PrivilegedHelperManager.shared
         
-        // Eject triggers filesystem sync, unmount, and diskutil eject
         let result = await helper.executeHelper(arguments: ["eject", devicePath, mountPoint])
         
         DispatchQueue.main.async {
             self.setBusy(for: drive.bsdName, isBusy: false)
             if result.status == 0 {
-                self.drives.removeAll { $0.bsdName == drive.bsdName }
+                self.userEjectedDevices.insert(drive.bsdName)
+                self.userEjectedDevices.insert(drive.parentDevice)
+                self.connectionDebounceWorkItems[drive.bsdName]?.cancel()
+                self.connectionDebounceWorkItems.removeValue(forKey: drive.bsdName)
+                self.drives.removeAll { $0.bsdName == drive.bsdName || $0.parentDevice == drive.parentDevice }
                 self.notifyUser(title: "Safe Eject & Sync", message: "\(drive.name) has been safely flushed and ejected. You can now unplug it.")
             } else {
-                self.notifyUser(title: "Eject Warning", message: "Could not eject \(drive.name). A file may still be in use.")
+                let failureReason: String
+                if result.output.contains("EJECT_FAILED_BUSY") || result.output.contains("files are open by:") {
+                    let busyPart = result.output.components(separatedBy: "files are open by:").last?.components(separatedBy: ".").first?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+                    if !busyPart.isEmpty {
+                        failureReason = "Could not eject \(drive.name). Files are in use by: \(busyPart). Please close open files or apps and try again."
+                    } else {
+                        failureReason = "Could not eject \(drive.name). A file or application is currently using it."
+                    }
+                } else {
+                    failureReason = "Could not eject \(drive.name). Please close any open files and try again."
+                }
+                self.notifyUser(title: "Eject Warning", message: failureReason)
             }
         }
         scanDrives()
@@ -422,10 +651,15 @@ public final class DiskManager: ObservableObject, @unchecked Sendable {
         }
     }
     
-    private func setBusy(for bsdName: String, isBusy: Bool) {
+    private func setBusy(for bsdName: String, isBusy: Bool, statusMessage: String? = nil) {
         DispatchQueue.main.async {
             if let idx = self.drives.firstIndex(where: { $0.bsdName == bsdName }) {
                 self.drives[idx].isBusy = isBusy
+                if let msg = statusMessage {
+                    self.drives[idx].statusMessage = msg
+                } else if !isBusy {
+                    self.drives[idx].statusMessage = nil
+                }
             }
         }
     }
@@ -461,28 +695,34 @@ public final class DiskManager: ObservableObject, @unchecked Sendable {
     
     // MARK: - Simulation Mode (For verification without physical SSD attached)
     public func simulateCrucialX9() {
-        let sim = NTFSDrive(
-            id: "sim_crucial_x9",
-            bsdName: "disk4s1",
-            parentDevice: "disk4",
-            name: "Crucial X9",
-            totalBytes: 1_000_000_000_000,
-            freeBytes: 420_000_000_000,
-            mountPoint: "/Volumes/Crucial X9",
-            isMounted: true,
-            isInternal: false,
-            filesystem: "NTFS",
-            mountMode: .readOnly,
-            healthState: .clean,
-            isBusy: false,
-            isSimulated: true
-        )
-        if !drives.contains(where: { $0.id == sim.id }) {
-            drives.append(sim)
+        DispatchQueue.main.async { [weak self] in
+            guard let self = self else { return }
+            let sim = NTFSDrive(
+                id: "sim_crucial_x9",
+                bsdName: "disk4s1",
+                parentDevice: "disk4",
+                name: "Crucial X9",
+                totalBytes: 1_000_000_000_000,
+                freeBytes: 420_000_000_000,
+                mountPoint: "/Volumes/Crucial X9",
+                isMounted: true,
+                isInternal: false,
+                filesystem: "NTFS",
+                mountMode: .readOnly,
+                healthState: .clean,
+                isBusy: false,
+                isSimulated: true,
+                isVirtual: false
+            )
+            if !self.drives.contains(where: { $0.id == sim.id }) {
+                self.drives.append(sim)
+            }
         }
     }
     
     public func removeSimulatedDrive() {
-        drives.removeAll { $0.isSimulated }
+        DispatchQueue.main.async { [weak self] in
+            self?.drives.removeAll { $0.isSimulated }
+        }
     }
 }

@@ -137,16 +137,25 @@ public struct MenuBarView: View {
                 
                 // Mode Badge
                 HStack(spacing: 4) {
-                    Circle()
-                        .fill(drive.mountMode.badgeColor)
-                        .frame(width: 8, height: 8)
-                    Text(drive.mountMode.rawValue)
-                        .font(.system(size: 10, weight: .medium))
-                        .foregroundColor(drive.mountMode.badgeColor)
+                    if drive.isBusy {
+                        ProgressView()
+                            .scaleEffect(0.5)
+                            .frame(width: 8, height: 8)
+                        Text(drive.statusMessage ?? "Mounting...")
+                            .font(.system(size: 10, weight: .medium))
+                            .foregroundColor(.blue)
+                    } else {
+                        Circle()
+                            .fill(drive.mountMode.badgeColor)
+                            .frame(width: 8, height: 8)
+                        Text(drive.mountMode.rawValue)
+                            .font(.system(size: 10, weight: .medium))
+                            .foregroundColor(drive.mountMode.badgeColor)
+                    }
                 }
                 .padding(.horizontal, 6)
                 .padding(.vertical, 3)
-                .background(drive.mountMode.badgeColor.opacity(0.12))
+                .background((drive.isBusy ? Color.blue : drive.mountMode.badgeColor).opacity(0.12))
                 .cornerRadius(6)
             }
             
@@ -195,9 +204,7 @@ public struct MenuBarView: View {
             HStack(spacing: 6) {
                 if drive.mountMode != .readWrite {
                     Button {
-                        Task {
-                            _ = await diskManager.mountReadWrite(drive: drive)
-                        }
+                        diskManager.userRequestedMount(drive: drive)
                     } label: {
                         HStack(spacing: 4) {
                             if drive.isBusy {
@@ -239,6 +246,7 @@ public struct MenuBarView: View {
                     Image(systemName: "stethoscope")
                 }
                 .buttonStyle(.bordered)
+                .disabled(drive.isBusy)
                 .help("Check Volume Health (ntfsfix dry-run)")
             }
         }

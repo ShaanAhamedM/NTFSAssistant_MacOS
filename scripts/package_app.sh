@@ -46,6 +46,7 @@ cp -f "${PROJECT_DIR}/bin/ntfs-3g" "${RESOURCES_DIR}/bin/"
 cp -f "${PROJECT_DIR}/bin/ntfsfix" "${RESOURCES_DIR}/bin/"
 cp -f "${PROJECT_DIR}/bin/ntfslabel" "${RESOURCES_DIR}/bin/"
 cp -f "${PROJECT_DIR}/bin/ntfsinfo" "${RESOURCES_DIR}/bin/"
+cp -f "${PROJECT_DIR}/bin/mkntfs" "${RESOURCES_DIR}/bin/" 2>/dev/null || true
 cp -f "${PROJECT_DIR}/bin/go-nfsv4" "${RESOURCES_DIR}/bin/"
 
 cp -f "${PROJECT_DIR}/lib/"* "${RESOURCES_DIR}/lib/" 2>/dev/null || true
