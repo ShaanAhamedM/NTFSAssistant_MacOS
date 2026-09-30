@@ -41,6 +41,8 @@ mkdir -p "${RESOURCES_DIR}/scripts"
 cp -f "${RELEASE_BIN}" "${MACOS_DIR}/NTFSAssistant"
 chmod 755 "${MACOS_DIR}/NTFSAssistant"
 
+mkdir -p "${RESOURCES_DIR}/packages"
+
 # Copy embedded drivers & tools
 cp -f "${PROJECT_DIR}/bin/ntfs-3g" "${RESOURCES_DIR}/bin/"
 cp -f "${PROJECT_DIR}/bin/ntfsfix" "${RESOURCES_DIR}/bin/"
@@ -51,7 +53,11 @@ cp -f "${PROJECT_DIR}/bin/go-nfsv4" "${RESOURCES_DIR}/bin/"
 
 cp -f "${PROJECT_DIR}/lib/"* "${RESOURCES_DIR}/lib/" 2>/dev/null || true
 cp -f "${PROJECT_DIR}/scripts/ntfs-mount-helper.sh" "${RESOURCES_DIR}/scripts/ntfs-mount-helper"
+cp -f "${PROJECT_DIR}/scripts/ntfs-mount-helper.sh" "${RESOURCES_DIR}/scripts/ntfs-mount-helper.sh"
 cp -f "${PROJECT_DIR}/scripts/setup_environment.sh" "${RESOURCES_DIR}/scripts/"
+if [ -f "${PROJECT_DIR}/scripts/fuse-t.pkg" ]; then
+    cp -f "${PROJECT_DIR}/scripts/fuse-t.pkg" "${RESOURCES_DIR}/packages/"
+fi
 
 chmod 755 "${RESOURCES_DIR}/bin/"* "${RESOURCES_DIR}/scripts/"*
 

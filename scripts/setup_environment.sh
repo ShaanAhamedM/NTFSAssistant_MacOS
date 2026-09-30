@@ -29,8 +29,16 @@ if [ -d "/Library/Application Support/fuse-t" ] || [ -f "/usr/local/lib/libfuse-
     FUSE_T_INSTALLED=true
     echo "  ✔ FUSE-T is already installed."
 else
-    echo "  -> Installing FUSE-T from pkg..."
     PKG_PATH="${SCRIPT_DIR}/fuse-t.pkg"
+    if [ ! -f "${PKG_PATH}" ]; then
+        if [ -f "${BASE_DIR}/packages/fuse-t.pkg" ]; then
+            PKG_PATH="${BASE_DIR}/packages/fuse-t.pkg"
+        elif [ -f "${BASE_DIR}/scripts/fuse-t.pkg" ]; then
+            PKG_PATH="${BASE_DIR}/scripts/fuse-t.pkg"
+        elif [ -f "${SCRIPT_DIR}/../packages/fuse-t.pkg" ]; then
+            PKG_PATH="${SCRIPT_DIR}/../packages/fuse-t.pkg"
+        fi
+    fi
     if [ ! -f "${PKG_PATH}" ]; then
         echo "  -> Downloading latest FUSE-T package..."
         curl -L -o "${PKG_PATH}" "https://github.com/macos-fuse-t/fuse-t/releases/download/1.2.7/fuse-t-macos-installer-1.2.7.pkg"
@@ -73,9 +81,14 @@ echo "  ✔ Driver binaries and libraries installed successfully."
 # 5. Install privileged helper script
 echo "[5/6] Installing privileged mount helper..."
 HELPER_DEST="/Library/Application Support/NTFSAssistant/ntfs-mount-helper"
-sudo /bin/cp -f "${SCRIPT_DIR}/ntfs-mount-helper.sh" "${HELPER_DEST}"
-sudo /usr/sbin/chown root:wheel "${HELPER_DEST}"
-sudo /bin/chmod 755 "${HELPER_DEST}"
+HELPER_SRC="${SCRIPT_DIR}/ntfs-mount-helper.sh"
+if [ ! -f "${HELPER_SRC}" ]; then
+    HELPER_SRC="${SCRIPT_DIR}/ntfs-mount-helper"
+fi
+sudo /bin/cp -f "${HELPER_SRC}" "${HELPER_DEST}"
+sudo /bin/cp -f "${SCRIPT_DIR}/setup_environment.sh" "/Library/Application Support/NTFSAssistant/setup_environment.sh" 2>/dev/null || true
+sudo /usr/sbin/chown root:wheel "${HELPER_DEST}" "/Library/Application Support/NTFSAssistant/setup_environment.sh" 2>/dev/null || true
+sudo /bin/chmod 755 "${HELPER_DEST}" "/Library/Application Support/NTFSAssistant/setup_environment.sh" 2>/dev/null || true
 echo "  ✔ Helper script installed at: ${HELPER_DEST}"
 
 # 6. Configure sudoers.d for passwordless mounting operations

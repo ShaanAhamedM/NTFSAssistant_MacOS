@@ -16,13 +16,15 @@ public final class PrivilegedHelperManager: @unchecked Sendable {
             return systemPath
         }
         
-        if let bundleResource = Bundle.main.path(forResource: "ntfs-mount-helper", ofType: "sh", inDirectory: "scripts") {
-            return bundleResource
-        }
-        
-        let workspacePath = "/Users/shaanm/NTFSAssistant/scripts/ntfs-mount-helper.sh"
-        if FileManager.default.fileExists(atPath: workspacePath) {
-            return workspacePath
+        if let resourcePath = Bundle.main.resourcePath {
+            let bundleHelper = "\(resourcePath)/scripts/ntfs-mount-helper"
+            if FileManager.default.fileExists(atPath: bundleHelper) {
+                return bundleHelper
+            }
+            let bundleHelperSh = "\(resourcePath)/scripts/ntfs-mount-helper.sh"
+            if FileManager.default.fileExists(atPath: bundleHelperSh) {
+                return bundleHelperSh
+            }
         }
         
         return systemPath
@@ -122,13 +124,20 @@ public final class PrivilegedHelperManager: @unchecked Sendable {
     
     public func installHelperViaAdminPrompt(completion: @escaping @MainActor @Sendable (Bool, String) -> Void) {
         DispatchQueue.global(qos: .userInitiated).async {
-            let scriptCandidates = [
-                Bundle.main.path(forResource: "setup_environment", ofType: "sh"),
-                "/Library/Application Support/NTFSAssistant/setup_environment.sh",
-                FileManager.default.currentDirectoryPath + "/scripts/setup_environment.sh",
-                "/Users/shaanm/NTFSAssistant/scripts/setup_environment.sh"
-            ]
-            let setupScript = scriptCandidates.compactMap { $0 }.first { FileManager.default.fileExists(atPath: $0) } ?? "/Library/Application Support/NTFSAssistant/setup_environment.sh"
+            var scriptCandidates: [String] = []
+            if let resPath = Bundle.main.resourcePath {
+                scriptCandidates.append("\(resPath)/scripts/setup_environment.sh")
+            }
+            if let res = Bundle.main.path(forResource: "setup_environment", ofType: "sh", inDirectory: "scripts") {
+                scriptCandidates.append(res)
+            }
+            if let res = Bundle.main.path(forResource: "setup_environment", ofType: "sh") {
+                scriptCandidates.append(res)
+            }
+            scriptCandidates.append("/Library/Application Support/NTFSAssistant/setup_environment.sh")
+            scriptCandidates.append(FileManager.default.currentDirectoryPath + "/scripts/setup_environment.sh")
+            
+            let setupScript = scriptCandidates.first { FileManager.default.fileExists(atPath: $0) } ?? "/Library/Application Support/NTFSAssistant/setup_environment.sh"
             
             let escapedScript = setupScript
                 .replacingOccurrences(of: "\\", with: "\\\\")

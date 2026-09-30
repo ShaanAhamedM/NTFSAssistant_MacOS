@@ -4,6 +4,7 @@ build/
 DerivedData/
 *.o
 *.dylib
+!lib/*.dylib
 *.a
 
 # Packages and Installers
